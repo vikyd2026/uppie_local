@@ -69,7 +69,7 @@ market_data = api_get(
 nifty = market_data["NSE_INDEX:Nifty 50"]
 vix = market_data["NSE_INDEX:India VIX"]
 
-print(f"NIFTY LTP     : {nifty['last_price']}")
+print(f"NIFTY LTP     :: {nifty['last_price']}")
 print(f"NIFTY CHANGE  : {nifty['last_price'] - nifty['cp']:.2f}")
 
 print(f"INDIA VIX     : {vix['last_price']}")
