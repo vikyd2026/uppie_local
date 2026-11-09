@@ -387,5 +387,25 @@ try:
     st.subheader("Raw MongoDB data")
     st.dataframe(raw_df, use_container_width=True, height=420, hide_index=True)
 
+    st.markdown("<div style='height: 24px;'></div>", unsafe_allow_html=True)
+
+    if st.button("Cleanup Data", type="secondary"):
+        st.session_state.cleanup_requested = True
+
+    if st.session_state.get("cleanup_requested"):
+        st.warning("This will delete all raw_data and nifty_data entries. This action cannot be undone. Click below to confirm.")
+        col_confirm, col_cancel = st.columns([1, 1])
+        with col_confirm:
+            if st.button("Confirm Cleanup", type="primary"):
+                db["raw_data"].delete_many({})
+                db["nifty_data"].delete_many({})
+                st.session_state.cleanup_requested = False
+                st.success("Cleanup complete.")
+                st.rerun()
+        with col_cancel:
+            if st.button("Cancel", type="secondary"):
+                st.session_state.cleanup_requested = False
+                st.rerun()
+
 except Exception as e:
     st.error(f"Unable to connect to MongoDB: {e}")
