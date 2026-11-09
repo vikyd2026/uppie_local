@@ -28,6 +28,80 @@ session.headers.update(HEADERS)
 client = pymongo.MongoClient(Constants.mongo_conn, tlsCAFile=certifi.where())
 db = client.get_database('uppie')
 collection_dashboard_data = db["raw_data"]
+collection_nifty_data = db["nifty_data"]
+
+
+def normalize_ohlc(ohlc_payload):
+    if not isinstance(ohlc_payload, dict):
+        return {}
+
+    return {
+        "open": ohlc_payload.get("open"),
+        "high": ohlc_payload.get("high"),
+        "low": ohlc_payload.get("low"),
+        "close": ohlc_payload.get("close"),
+    }
+
+
+def normalize_candle_ohlc(raw_candle):
+    if isinstance(raw_candle, dict):
+        return {
+            "open": raw_candle.get("open"),
+            "high": raw_candle.get("high"),
+            "low": raw_candle.get("low"),
+            "close": raw_candle.get("close"),
+        }
+
+    if isinstance(raw_candle, (list, tuple)) and len(raw_candle) >= 5:
+        return {
+            "open": raw_candle[1],
+            "high": raw_candle[2],
+            "low": raw_candle[3],
+            "close": raw_candle[4],
+        }
+
+    return {}
+
+
+def fetch_ohlc_for_instrument(instrument_key):
+    instrument_key_key = instrument_key.replace("|", ":")
+
+    try:
+        response = api_get(
+            "/v3/market-quote/ohlc",
+            {
+                "instrument_key": instrument_key
+            }
+        )
+        if isinstance(response, dict):
+            payload = response.get(instrument_key_key) or response.get("data") or response
+            if isinstance(payload, dict):
+                ohlc = payload.get("ohlc")
+                if isinstance(ohlc, dict):
+                    return normalize_ohlc(ohlc)
+            return normalize_ohlc(payload)
+    except Exception as exc:
+        if not getattr(getattr(exc, "response", None), "status_code", None) == 400:
+            raise
+
+    try:
+        candle_window_from = (datetime.now() - timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M")
+        candle_window_to = datetime.now().strftime("%Y-%m-%dT%H:%M")
+        response = api_get(
+            f"/v3/historical-candle/{quote(instrument_key, safe='')}/1minute",
+            {
+                "from": candle_window_from,
+                "to": candle_window_to,
+            }
+        )
+        payload = response.get("data", response)
+        candles = payload.get("candles", []) if isinstance(payload, dict) else payload
+        if not candles:
+            return {}
+        latest_candle = candles[-1]
+        return normalize_candle_ohlc(latest_candle)
+    except Exception:
+        return {}
 
 
 def api_get(endpoint, params=None):
@@ -75,9 +149,38 @@ print(f"NIFTY CHANGE  : {nifty['last_price'] - nifty['cp']:.2f}")
 print(f"INDIA VIX     : {vix['last_price']}")
 print(f"VIX CHANGE    : {vix['last_price'] - vix['cp']:.2f}")
 
+# --------------------------------
+# 2. GET OHLC FOR NIFTY AND VIX
+# --------------------------------
+
+ohlc_market_data = {}
+for instrument_key in ["NSE_INDEX|Nifty 50", "NSE_INDEX|India VIX"]:
+    ohlc_market_data[instrument_key.replace("|", ":")] = fetch_ohlc_for_instrument(instrument_key)
+
+nifty_ohlc = ohlc_market_data.get("NSE_INDEX:Nifty 50", {})
+vix_ohlc = ohlc_market_data.get("NSE_INDEX:India VIX", {})
+
+nifty_snapshot = {
+    "date_label": date_label,
+    "time_label": data_label,
+    "timestamp": now.isoformat(timespec="seconds"),
+    "instrument": "NSE_INDEX|Nifty 50",
+    "nifty_ltp": nifty.get("last_price"),
+    "nifty_value": nifty.get("last_price"),
+    "nifty_ohlc": nifty_ohlc,
+    "nifty_change": nifty.get("last_price") - nifty.get("cp", 0),
+    "vix_ltp": vix.get("last_price"),
+    "vix_value": vix.get("last_price"),
+    "vix_ohlc": vix_ohlc,
+    "vix_change": vix.get("last_price") - vix.get("cp", 0),
+    "source": "upstox"
+}
+
+inserted_snapshot = collection_nifty_data.insert_one(nifty_snapshot)
+print(f"Inserted nifty snapshot into nifty_data with id: {inserted_snapshot.inserted_id}")
 
 # --------------------------------
-# 2. GET AVAILABLE OPTION CONTRACTS
+# 3. GET AVAILABLE OPTION CONTRACTS
 # --------------------------------
 
 print("\n========== OPTION EXPIRY ==========")

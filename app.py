@@ -4,8 +4,8 @@ import certifi
 import pandas as pd
 import Constants
 
-st.set_page_config(page_title="Live Dashboard", page_icon="📊", layout="wide")
-st.title("Live Dashboard")
+st.set_page_config(page_title="Uppie", page_icon="📊", layout="wide")
+st.title("Uppie")
 
 if st.button("Refresh Data", type="primary"):
     st.rerun()
@@ -24,6 +24,16 @@ try:
     if not raw_df.empty:
         raw_df = raw_df.drop(columns=["_id"], errors="ignore")
         raw_df = raw_df.fillna("")
+
+    nifty_collection = db["nifty_data"]
+    nifty_docs = list(nifty_collection.find({}).sort([
+        ("date_label", -1),
+        ("time_label", -1),
+    ]))
+    nifty_df = pd.DataFrame(nifty_docs)
+    if not nifty_df.empty:
+        nifty_df = nifty_df.drop(columns=["_id"], errors="ignore")
+        nifty_df = nifty_df.fillna("")
 
     processed_docs = list(collection.find({"processed": 1}).sort([
         ("date_label", -1),
@@ -109,9 +119,48 @@ try:
                     derived_df = derived_df[["time_label", "overall_sentiment", "sentiment"] + [str(s) for s in strike_cols]]
                     derived_df = derived_df.fillna("")
                     derived_df = derived_df.sort_values("time_label", key=lambda x: pd.to_datetime(x, format="%H:%M"), ascending=False).reset_index(drop=True)
-                    first_row_overall = int(derived_df["overall_sentiment"].iloc[0]) if not derived_df.empty else 0
 
+                    if not nifty_df.empty:
+                        nifty_lookup = nifty_df[["time_label", "nifty_ltp", "vix_ltp"]].copy()
+                        nifty_lookup = nifty_lookup.drop_duplicates(subset=["time_label"], keep="last")
+                        nifty_lookup["time_label"] = nifty_lookup["time_label"].astype(str)
+                        nifty_lookup["nifty_ltp"] = pd.to_numeric(nifty_lookup["nifty_ltp"], errors="coerce")
+                        nifty_lookup["vix_ltp"] = pd.to_numeric(nifty_lookup["vix_ltp"], errors="coerce")
+                        derived_df = derived_df.merge(
+                            nifty_lookup,
+                            on="time_label",
+                            how="left"
+                        )
+                        derived_df = derived_df.rename(columns={
+                            "nifty_ltp": "nifty",
+                            "vix_ltp": "vix",
+                        })
+                        derived_df["nifty"] = derived_df["nifty"].map(lambda x: f"{float(x):.2f}" if pd.notna(x) else "")
+                        derived_df["vix"] = derived_df["vix"].map(lambda x: f"{float(x):.2f}" if pd.notna(x) else "")
+                        derived_df = derived_df[["time_label", "nifty", "vix", "overall_sentiment", "sentiment"] + [str(s) for s in strike_cols]]
+                    else:
+                        derived_df.insert(1, "nifty", "")
+                        derived_df.insert(2, "vix", "")
+
+                    first_row_overall = int(derived_df["overall_sentiment"].iloc[0]) if not derived_df.empty else 0
                     strike_cols_display = [str(s) for s in strike_cols]
+
+                    for col in strike_cols_display:
+                        for row_idx in range(len(derived_df)):
+                            current_value = pd.to_numeric(derived_df.iloc[row_idx][col], errors="coerce")
+                            if pd.isna(current_value):
+                                continue
+                            if row_idx < len(derived_df) - 1:
+                                compare_value = pd.to_numeric(derived_df.iloc[row_idx + 1][col], errors="coerce")
+                            else:
+                                compare_value = None
+                            if pd.notna(compare_value):
+                                if current_value > compare_value:
+                                    derived_df.at[row_idx, col] = f"↑ {float(current_value):.2f}"
+                                elif current_value < compare_value:
+                                    derived_df.at[row_idx, col] = f"↓ {float(current_value):.2f}"
+                                else:
+                                    derived_df.at[row_idx, col] = f"{float(current_value):.2f}"
 
                     def apply_styles(row):
                         styles = []
@@ -120,14 +169,23 @@ try:
                             if col == "time_label":
                                 styles.append("background-color: #f3f4f6; color: #111; font-weight: 600")
                                 continue
+                            if col in ["nifty", "vix"]:
+                                styles.append("background-color: #f3f4f6; color: #1f2937; font-weight: 600")
+                                continue
                             if col == "overall_sentiment":
-                                prev_value = None
-                                if row.name > 0:
-                                    prev_value = derived_df.iloc[row.name - 1]["overall_sentiment"]
-                                if prev_value is None or value >= prev_value:
+                                compare_value = None
+                                if row.name < len(derived_df) - 1:
+                                    compare_value = derived_df.iloc[row.name + 1]["overall_sentiment"]
+                                elif row.name > 0:
+                                    compare_value = derived_df.iloc[row.name - 1]["overall_sentiment"]
+                                if compare_value is None or pd.isna(compare_value):
+                                    styles.append("background-color: #f3f4f6; color: #111; font-weight: bold")
+                                elif value > compare_value:
                                     styles.append("background-color: #e8f5e9; color: green; font-weight: bold")
-                                else:
+                                elif value < compare_value:
                                     styles.append("background-color: #ffebee; color: red; font-weight: bold")
+                                else:
+                                    styles.append("background-color: #f3f4f6; color: #111; font-weight: bold")
                                 continue
                             if col == "sentiment":
                                 styles.append("background-color: #eef2ff; color: #1f2937; font-weight: 600")
@@ -137,18 +195,27 @@ try:
                                 styles.append("")
                                 continue
 
+                            arrow_color = ""
+                            if isinstance(value, str) and value.startswith(("↑", "↓")):
+                                if value.startswith("↑"):
+                                    arrow_color = "color: blue; font-weight: bold"
+                                else:
+                                    arrow_color = "color: red; font-weight: bold"
+
                             nature = cell_nature.get((row["time_label"], float(col)), "")
                             if nature == "RESISTANCE":
                                 styles.append("background-color: #ffebee; color: red; font-weight: bold")
                             elif nature == "SUPPORT":
                                 styles.append("background-color: #e8f5e9; color: green; font-weight: bold")
+                            elif arrow_color:
+                                styles.append(arrow_color)
                             else:
                                 styles.append("")
                         return styles
 
                     styled_derived = derived_df.style.apply(apply_styles, axis=1)
                     st.subheader("Derived strength matrix")
-                    st.dataframe(styled_derived, use_container_width=True, height=700, hide_index=True)
+                    st.dataframe(styled_derived, use_container_width=True, height=350, hide_index=True)
 
                     event_labels = sorted(
                         {
@@ -225,8 +292,97 @@ try:
                     styled_tracker = styled_tracker.apply(style_strike_table, axis=None)
 
                     st.subheader("Strike Event Tracker")
-                    st.dataframe(styled_tracker, use_container_width=True, height=420, hide_index=True)
+                    st.dataframe(styled_tracker, use_container_width=True, height=210, hide_index=True)
                     st.markdown(f"<span style='font-size: 18px; font-weight: bold; color: #111;'>Overall Sentiment : {overall_sentiment_total}</span>", unsafe_allow_html=True)
+
+                    activity_meanings = [
+                        {
+                            "Activity": "CE Fresh Buying",
+                            "Simple Meaning": "Traders are buying Calls expecting the market to go up.",
+                            "Count": 0,
+                        },
+                        {
+                            "Activity": "PE Fresh Buying",
+                            "Simple Meaning": "Traders are buying Puts expecting the market to go down.",
+                            "Count": 0,
+                        },
+                        {
+                            "Activity": "CE Fresh Writing",
+                            "Simple Meaning": "Traders are selling Calls expecting the market to stay below or fall.",
+                            "Count": 0,
+                        },
+                        {
+                            "Activity": "PE Fresh Writing",
+                            "Simple Meaning": "Traders are selling Puts expecting the market to stay above or rise.",
+                            "Count": 0,
+                        },
+                        {
+                            "Activity": "CE Short Covering",
+                            "Simple Meaning": "Call sellers are exiting because the market is rising.",
+                            "Count": 0,
+                        },
+                        {
+                            "Activity": "PE Short Covering",
+                            "Simple Meaning": "Put sellers are exiting because the market is falling or uncertainty is increasing.",
+                            "Count": 0,
+                        },
+                        {
+                            "Activity": "CE Long Unwinding",
+                            "Simple Meaning": "Call buyers are booking losses/profits and exiting; bullishness is weakening.",
+                            "Count": 0,
+                        },
+                        {
+                            "Activity": "PE Long Unwinding",
+                            "Simple Meaning": "Put buyers are booking losses/profits and exiting; bearishness is weakening.",
+                            "Count": 0,
+                        },
+                    ]
+
+                    activity_df = pd.DataFrame(activity_meanings)
+                    if isinstance(strike_tracker_df, pd.DataFrame) and not strike_tracker_df.empty:
+                        totals_row_map = pd.DataFrame([totals_row]).iloc[0].to_dict()
+                        for idx, row in activity_df.iterrows():
+                            activity_name = row["Activity"]
+                            activity_total = 0
+                            if activity_name in totals_row_map:
+                                activity_total = int(pd.to_numeric(totals_row_map[activity_name], errors="coerce"))
+                            activity_df.at[idx, "Count"] = activity_total
+
+                    st.subheader("Activity Meanings")
+                    green_activities = {
+                        "CE Fresh Buying",
+                        "PE Fresh Writing",
+                        "CE Short Covering",
+                        "PE Long Unwinding",
+                    }
+                    red_activities = {
+                        "PE Fresh Buying",
+                        "CE Fresh Writing",
+                        "PE Short Covering",
+                        "CE Long Unwinding",
+                    }
+
+                    display_activity_df = activity_df[["Activity", "Count", "Simple Meaning"]].copy()
+
+                    def color_activity_rows(row):
+                        activity = row["Activity"]
+                        if activity in green_activities:
+                            return ["background-color: #e8f5e9; color: green; font-weight: bold"] * 3
+                        if activity in red_activities:
+                            return ["background-color: #ffebee; color: red; font-weight: bold"] * 3
+                        return ["background-color: #f3f4f6; color: #111; font-weight: normal"] * 3
+
+                    st.dataframe(
+                        display_activity_df.style.apply(color_activity_rows, axis=1),
+                        use_container_width=False,
+                        width=1000,
+                        hide_index=True,
+                        column_config={
+                            "Activity": st.column_config.TextColumn(width="small"),
+                            "Count": st.column_config.NumberColumn(width="small"),
+                            "Simple Meaning": st.column_config.TextColumn(width="large"),
+                        },
+                    )
 
     st.subheader("Raw MongoDB data")
     st.dataframe(raw_df, use_container_width=True, height=420, hide_index=True)
