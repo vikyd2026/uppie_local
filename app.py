@@ -120,27 +120,50 @@ try:
                     derived_df = derived_df.fillna("")
                     derived_df = derived_df.sort_values("time_label", key=lambda x: pd.to_datetime(x, format="%H:%M"), ascending=False).reset_index(drop=True)
 
+                    def safe_float_label(value):
+                        if value is None:
+                            return ""
+                        if isinstance(value, str):
+                            value = value.strip()
+                            if value in ["", "nan", "NaN", "None", "none"]:
+                                return ""
+                        try:
+                            return f"{float(value):.2f}"
+                        except (TypeError, ValueError):
+                            return ""
+
                     if not nifty_df.empty:
-                        nifty_lookup = nifty_df[["time_label", "nifty_ltp", "vix_ltp"]].copy()
-                        nifty_lookup = nifty_lookup.drop_duplicates(subset=["time_label"], keep="last")
+                        nifty_lookup = nifty_df[["time_label"]].copy()
                         nifty_lookup["time_label"] = nifty_lookup["time_label"].astype(str)
-                        nifty_lookup["nifty_ltp"] = pd.to_numeric(nifty_lookup["nifty_ltp"], errors="coerce")
-                        nifty_lookup["vix_ltp"] = pd.to_numeric(nifty_lookup["vix_ltp"], errors="coerce")
+                        nifty_lookup["nifty"] = pd.to_numeric(
+                            nifty_df["nifty_value"] if "nifty_value" in nifty_df.columns else nifty_df["nifty_ltp"],
+                            errors="coerce"
+                        )
+                        nifty_lookup["vix"] = pd.to_numeric(
+                            nifty_df["vix_value"] if "vix_value" in nifty_df.columns else nifty_df["vix_ltp"],
+                            errors="coerce"
+                        )
+                        for col in ["dsm_direction", "bullish_score", "bearish_score", "dsm_gap_status"]:
+                            nifty_lookup[col] = nifty_df[col] if col in nifty_df.columns else ""
+                        nifty_lookup = nifty_lookup.drop_duplicates(subset=["time_label"], keep="last")
                         derived_df = derived_df.merge(
                             nifty_lookup,
                             on="time_label",
                             how="left"
                         )
-                        derived_df = derived_df.rename(columns={
-                            "nifty_ltp": "nifty",
-                            "vix_ltp": "vix",
-                        })
-                        derived_df["nifty"] = derived_df["nifty"].map(lambda x: f"{float(x):.2f}" if pd.notna(x) else "")
-                        derived_df["vix"] = derived_df["vix"].map(lambda x: f"{float(x):.2f}" if pd.notna(x) else "")
-                        derived_df = derived_df[["time_label", "nifty", "vix", "overall_sentiment", "sentiment"] + [str(s) for s in strike_cols]]
+                        derived_df["nifty"] = derived_df["nifty"].map(safe_float_label)
+                        derived_df["vix"] = derived_df["vix"].map(safe_float_label)
+                        derived_df["bullish_score"] = derived_df["bullish_score"].map(safe_float_label)
+                        derived_df["bearish_score"] = derived_df["bearish_score"].map(safe_float_label)
+                        derived_df = derived_df[["time_label", "nifty", "vix", "dsm_direction", "bullish_score", "bearish_score", "dsm_gap_status", "overall_sentiment", "sentiment"] + [str(s) for s in strike_cols]]
                     else:
                         derived_df.insert(1, "nifty", "")
                         derived_df.insert(2, "vix", "")
+                        derived_df.insert(3, "dsm_direction", "")
+                        derived_df.insert(4, "bullish_score", "")
+                        derived_df.insert(5, "bearish_score", "")
+                        derived_df.insert(6, "dsm_gap_status", "")
+                        derived_df = derived_df[["time_label", "nifty", "vix", "dsm_direction", "bullish_score", "bearish_score", "dsm_gap_status", "overall_sentiment", "sentiment"] + [str(s) for s in strike_cols]]
 
                     first_row_overall = int(derived_df["overall_sentiment"].iloc[0]) if not derived_df.empty else 0
                     strike_cols_display = [str(s) for s in strike_cols]
@@ -171,6 +194,27 @@ try:
                                 continue
                             if col in ["nifty", "vix"]:
                                 styles.append("background-color: #f3f4f6; color: #1f2937; font-weight: 600")
+                                continue
+                            if col == "dsm_direction":
+                                direction = str(value).upper() if value not in [None, "", "nan", "NaN"] else ""
+                                if direction == "BULLISH":
+                                    styles.append("background-color: #e8f5e9; color: green; font-weight: bold")
+                                elif direction == "BEARISH":
+                                    styles.append("background-color: #ffebee; color: red; font-weight: bold")
+                                else:
+                                    styles.append("background-color: #f3f4f6; color: #1f2937; font-weight: 600")
+                                continue
+                            if col in ["bullish_score", "bearish_score"]:
+                                styles.append("background-color: #f8fafc; color: #1f2937; font-weight: 600")
+                                continue
+                            if col == "dsm_gap_status":
+                                gap_status = str(value).upper() if value not in [None, "", "nan", "NaN"] else ""
+                                if gap_status in ["UPGAP", "GAP UP", "BULLISH GAP"]:
+                                    styles.append("background-color: #e8f5e9; color: green; font-weight: bold")
+                                elif gap_status in ["DOWNGAP", "GAP DOWN", "BEARISH GAP"]:
+                                    styles.append("background-color: #ffebee; color: red; font-weight: bold")
+                                else:
+                                    styles.append("background-color: #f3f4f6; color: #1f2937; font-weight: 600")
                                 continue
                             if col == "overall_sentiment":
                                 compare_value = None
