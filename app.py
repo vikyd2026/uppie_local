@@ -65,14 +65,22 @@ try:
                 row_map = []
                 cell_nature = {}
                 previous_overall = 0
+                previous_categories = {}
 
                 for time_label in all_times:
                     time_rows = processed_df[processed_df["time_label"] == time_label]
                     sentiment_total = pd.to_numeric(time_rows["sentiment_count"], errors="coerce").fillna(0).sum()
                     sentiment_value = int(sentiment_total) if pd.notna(sentiment_total) else 0
                     overall_value = previous_overall + sentiment_value
+                    category_changed_strikes = 0
+                    category_red_to_green = 0
+                    category_green_to_red = 0
+                    current_categories = {}
                     row = {
                         "time_label": time_label,
+                        "category_changed_strikes": 0,
+                        "category_red_to_green": 0,
+                        "category_green_to_red": 0,
                         "overall_sentiment": overall_value,
                         "sentiment": sentiment_value,
                     }
@@ -94,6 +102,9 @@ try:
                         else:
                             value = ""
 
+                        if nature in ["RESISTANCE", "SUPPORT"]:
+                            current_categories[str(float(strike))] = nature
+
                         if value is None or value == 0 or value == 0.0:
                             row[str(strike)] = ""
                         else:
@@ -101,7 +112,20 @@ try:
                             row[str(strike)] = value_text
                             cell_nature[(time_label, float(strike))] = nature
 
-                    row_values = [v for k, v in row.items() if k not in ["time_label", "sentiment", "overall_sentiment"]]
+                    for strike_key, category in current_categories.items():
+                        previous_category = previous_categories.get(strike_key)
+                        if previous_category is not None and previous_category != category:
+                            category_changed_strikes += 1
+                            if previous_category == "RESISTANCE" and category == "SUPPORT":
+                                category_red_to_green += 1
+                            elif previous_category == "SUPPORT" and category == "RESISTANCE":
+                                category_green_to_red += 1
+                    row["category_changed_strikes"] = category_changed_strikes
+                    row["category_red_to_green"] = category_red_to_green
+                    row["category_green_to_red"] = category_green_to_red
+                    previous_categories = current_categories
+
+                    row_values = [v for k, v in row.items() if k not in ["time_label", "sentiment", "overall_sentiment", "category_changed_strikes", "category_red_to_green", "category_green_to_red"]]
                     if not any(
                         (v is not None)
                         and (str(v).strip() not in ["", "0", "0.0", "0.00", "NaN", "nan"])
@@ -116,7 +140,7 @@ try:
                     st.info("No valid rows after removing blank entries.")
                 else:
                     derived_df = pd.DataFrame(row_map)
-                    derived_df = derived_df[["time_label", "overall_sentiment", "sentiment"] + [str(s) for s in strike_cols]]
+                    derived_df = derived_df[["time_label", "category_changed_strikes", "category_red_to_green", "category_green_to_red", "overall_sentiment", "sentiment"] + [str(s) for s in strike_cols]]
                     derived_df = derived_df.fillna("")
                     derived_df = derived_df.sort_values("time_label", key=lambda x: pd.to_datetime(x, format="%H:%M"), ascending=False).reset_index(drop=True)
 
@@ -155,7 +179,6 @@ try:
                         derived_df["vix"] = derived_df["vix"].map(safe_float_label)
                         derived_df["bullish_score"] = derived_df["bullish_score"].map(safe_float_label)
                         derived_df["bearish_score"] = derived_df["bearish_score"].map(safe_float_label)
-                        derived_df = derived_df[["time_label", "nifty", "vix", "dsm_direction", "bullish_score", "bearish_score", "dsm_gap_status", "overall_sentiment", "sentiment"] + [str(s) for s in strike_cols]]
                     else:
                         derived_df.insert(1, "nifty", "")
                         derived_df.insert(2, "vix", "")
@@ -163,7 +186,20 @@ try:
                         derived_df.insert(4, "bullish_score", "")
                         derived_df.insert(5, "bearish_score", "")
                         derived_df.insert(6, "dsm_gap_status", "")
-                        derived_df = derived_df[["time_label", "nifty", "vix", "dsm_direction", "bullish_score", "bearish_score", "dsm_gap_status", "overall_sentiment", "sentiment"] + [str(s) for s in strike_cols]]
+
+                    derived_df["dsm_direction"] = derived_df.apply(
+                        lambda row: (
+                            "BULLISH"
+                            if int(pd.to_numeric(row.get("category_changed_strikes"), errors="coerce") or 0) == 1
+                            and int(pd.to_numeric(row.get("category_red_to_green"), errors="coerce") or 0) > 0
+                            else "BEARISH"
+                            if int(pd.to_numeric(row.get("category_changed_strikes"), errors="coerce") or 0) == 1
+                            and int(pd.to_numeric(row.get("category_green_to_red"), errors="coerce") or 0) > 0
+                            else row.get("dsm_direction", "")
+                        ),
+                        axis=1,
+                    )
+                    derived_df = derived_df[["time_label", "nifty", "vix", "dsm_direction", "bullish_score", "bearish_score", "dsm_gap_status", "category_changed_strikes", "category_red_to_green", "category_green_to_red", "overall_sentiment", "sentiment"] + [str(s) for s in strike_cols]]
 
                     first_row_overall = int(derived_df["overall_sentiment"].iloc[0]) if not derived_df.empty else 0
                     strike_cols_display = [str(s) for s in strike_cols]
@@ -216,6 +252,9 @@ try:
                                 else:
                                     styles.append("background-color: #f3f4f6; color: #1f2937; font-weight: 600")
                                 continue
+                            if col in ["category_changed_strikes", "category_red_to_green", "category_green_to_red"]:
+                                styles.append("background-color: #eef2ff; color: #1f2937; font-weight: 600")
+                                continue
                             if col == "overall_sentiment":
                                 compare_value = None
                                 if row.name < len(derived_df) - 1:
@@ -246,7 +285,13 @@ try:
                                 else:
                                     arrow_color = "color: red; font-weight: bold"
 
-                            nature = cell_nature.get((row["time_label"], float(col)), "")
+                            try:
+                                strike_key = float(col)
+                            except (TypeError, ValueError):
+                                styles.append("")
+                                continue
+
+                            nature = cell_nature.get((row["time_label"], strike_key), "")
                             if nature == "RESISTANCE":
                                 styles.append("background-color: #ffebee; color: red; font-weight: bold")
                             elif nature == "SUPPORT":
@@ -437,12 +482,14 @@ try:
         st.session_state.cleanup_requested = True
 
     if st.session_state.get("cleanup_requested"):
-        st.warning("This will delete all raw_data and nifty_data entries. This action cannot be undone. Click below to confirm.")
+        st.warning("This will delete all raw_data, nifty_data, trade_logs, and trade_state entries. This action cannot be undone. Click below to confirm.")
         col_confirm, col_cancel = st.columns([1, 1])
         with col_confirm:
             if st.button("Confirm Cleanup", type="primary"):
                 db["raw_data"].delete_many({})
                 db["nifty_data"].delete_many({})
+                db["trade_logs"].delete_many({})
+                db["trade_state"].delete_many({})
                 st.session_state.cleanup_requested = False
                 st.success("Cleanup complete.")
                 st.rerun()
