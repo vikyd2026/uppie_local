@@ -25,6 +25,20 @@ try:
         raw_df = raw_df.drop(columns=["_id"], errors="ignore")
         raw_df = raw_df.fillna("")
 
+    trade_events = [
+        "SIGNAL_DETECTED",
+        "STRIKE_SHORTLISTED",
+        "CONTRACT_SELECTED",
+        "GTT_SIMULATED",
+    ]
+    trade_docs = list(db["trade_logs"].find({
+        "event": {"$in": trade_events}
+    }).sort([
+        ("date_label", -1),
+        ("time_label", -1),
+        ("logged_at", -1),
+    ]))
+
     nifty_collection = db["nifty_data"]
     nifty_docs = list(nifty_collection.find({}).sort([
         ("date_label", -1),
@@ -34,6 +48,21 @@ try:
     if not nifty_df.empty:
         nifty_df = nifty_df.drop(columns=["_id"], errors="ignore")
         nifty_df = nifty_df.fillna("")
+
+    dsm_collection = db["dsm_results"]
+    dsm_docs = list(dsm_collection.find({}).sort([
+        ("date_label", -1),
+        ("time_label", -1),
+    ]))
+    if not dsm_docs:
+        dsm_docs = list(db["dsm_result"].find({}).sort([
+            ("date_label", -1),
+            ("time_label", -1),
+        ]))
+    dsm_df = pd.DataFrame(dsm_docs)
+    if not dsm_df.empty:
+        dsm_df = dsm_df.drop(columns=["_id"], errors="ignore")
+        dsm_df = dsm_df.fillna("")
 
     processed_docs = list(collection.find({"processed": 1}).sort([
         ("date_label", -1),
@@ -167,8 +196,6 @@ try:
                             nifty_df["vix_value"] if "vix_value" in nifty_df.columns else nifty_df["vix_ltp"],
                             errors="coerce"
                         )
-                        for col in ["dsm_direction", "bullish_score", "bearish_score", "dsm_gap_status"]:
-                            nifty_lookup[col] = nifty_df[col] if col in nifty_df.columns else ""
                         nifty_lookup = nifty_lookup.drop_duplicates(subset=["time_label"], keep="last")
                         derived_df = derived_df.merge(
                             nifty_lookup,
@@ -177,29 +204,57 @@ try:
                         )
                         derived_df["nifty"] = derived_df["nifty"].map(safe_float_label)
                         derived_df["vix"] = derived_df["vix"].map(safe_float_label)
-                        derived_df["bullish_score"] = derived_df["bullish_score"].map(safe_float_label)
-                        derived_df["bearish_score"] = derived_df["bearish_score"].map(safe_float_label)
                     else:
                         derived_df.insert(1, "nifty", "")
                         derived_df.insert(2, "vix", "")
-                        derived_df.insert(3, "dsm_direction", "")
-                        derived_df.insert(4, "bullish_score", "")
-                        derived_df.insert(5, "bearish_score", "")
-                        derived_df.insert(6, "dsm_gap_status", "")
 
-                    derived_df["dsm_direction"] = derived_df.apply(
-                        lambda row: (
-                            "BULLISH"
-                            if int(pd.to_numeric(row.get("category_changed_strikes"), errors="coerce") or 0) == 1
-                            and int(pd.to_numeric(row.get("category_red_to_green"), errors="coerce") or 0) > 0
-                            else "BEARISH"
-                            if int(pd.to_numeric(row.get("category_changed_strikes"), errors="coerce") or 0) == 1
-                            and int(pd.to_numeric(row.get("category_green_to_red"), errors="coerce") or 0) > 0
-                            else row.get("dsm_direction", "")
-                        ),
-                        axis=1,
-                    )
-                    derived_df = derived_df[["time_label", "nifty", "vix", "dsm_direction", "bullish_score", "bearish_score", "dsm_gap_status", "category_changed_strikes", "category_red_to_green", "category_green_to_red", "overall_sentiment", "sentiment"] + [str(s) for s in strike_cols]]
+                    dsm_fields = [
+                        "dsm_direction",
+                        "bullish_score",
+                        "bearish_score",
+                        "bullish_score_change",
+                        "bearish_score_change",
+                        "dsm_gap_status",
+                        "category_changed_strikes",
+                        "category_green_to_red",
+                        "category_red_to_green",
+                    ]
+                    def normalize_time_label(value):
+                        text = str(value).strip()
+                        if text in ["", "nan", "NaN", "None"]:
+                            return ""
+                        parsed = pd.to_datetime(text, format="%H:%M", errors="coerce")
+                        if pd.isna(parsed):
+                            parsed = pd.to_datetime(text, format="%H:%M:%S", errors="coerce")
+                        return parsed.strftime("%H:%M") if not pd.isna(parsed) else text
+
+                    if not dsm_df.empty:
+                        dsm_lookup = dsm_df[["time_label"]].copy()
+                        dsm_lookup["time_label"] = dsm_lookup["time_label"].astype(str).str.strip().map(normalize_time_label)
+                        derived_df["time_label"] = derived_df["time_label"].astype(str).str.strip().map(normalize_time_label)
+                        for col in dsm_fields:
+                            dsm_lookup[col] = dsm_df[col] if col in dsm_df.columns else ""
+                        dsm_lookup = dsm_lookup.drop_duplicates(subset=["time_label"], keep="last")
+                        derived_df = derived_df.drop(columns=dsm_fields, errors="ignore")
+                        derived_df = derived_df.merge(
+                            dsm_lookup,
+                            on="time_label",
+                            how="left"
+                        )
+                    else:
+                        for col in dsm_fields:
+                            derived_df[col] = ""
+
+                    derived_df["bullish_score"] = derived_df["bullish_score"].map(safe_float_label)
+                    derived_df["bearish_score"] = derived_df["bearish_score"].map(safe_float_label)
+                    derived_df["bullish_score_change"] = derived_df["bullish_score_change"].map(safe_float_label)
+                    derived_df["bearish_score_change"] = derived_df["bearish_score_change"].map(safe_float_label)
+                    for col in ["category_changed_strikes", "category_green_to_red", "category_red_to_green"]:
+                        numeric_values = pd.to_numeric(derived_df[col], errors="coerce")
+                        derived_df[col] = numeric_values.map(
+                            lambda value: int(value) if pd.notna(value) else ""
+                        )
+                    derived_df = derived_df[["time_label", "nifty", "vix", "dsm_direction", "bullish_score", "bearish_score", "bullish_score_change", "bearish_score_change", "dsm_gap_status", "category_changed_strikes", "category_red_to_green", "category_green_to_red", "overall_sentiment", "sentiment"] + [str(s) for s in strike_cols]]
 
                     first_row_overall = int(derived_df["overall_sentiment"].iloc[0]) if not derived_df.empty else 0
                     strike_cols_display = [str(s) for s in strike_cols]
@@ -240,7 +295,7 @@ try:
                                 else:
                                     styles.append("background-color: #f3f4f6; color: #1f2937; font-weight: 600")
                                 continue
-                            if col in ["bullish_score", "bearish_score"]:
+                            if col in ["bullish_score", "bearish_score", "bullish_score_change", "bearish_score_change"]:
                                 styles.append("background-color: #f8fafc; color: #1f2937; font-weight: 600")
                                 continue
                             if col == "dsm_gap_status":
@@ -472,6 +527,48 @@ try:
                             "Simple Meaning": st.column_config.TextColumn(width="large"),
                         },
                     )
+
+    st.subheader("Trade log data")
+    if trade_docs:
+        trade_rows = []
+        for doc in trade_docs:
+            gtt_payload = doc.get("gtt_payload", {})
+            gtt_rules = gtt_payload.get("rules", []) if isinstance(gtt_payload, dict) else []
+            gtt_prices = {
+                rule.get("strategy"): rule.get("trigger_price")
+                for rule in gtt_rules
+                if isinstance(rule, dict) and rule.get("strategy")
+            }
+
+            trade_rows.append({
+                "time_label": doc.get("time_label", ""),
+                "event": doc.get("event", ""),
+                "activity": doc.get("activity", ""),
+                "signal": doc.get("signal", ""),
+                "trading_symbol": doc.get("trading_symbol", ""),
+                "available balance": doc.get("available_balance", ""),
+                "affordability_balance": (
+                    doc.get("affordability_balance")
+                    if doc.get("affordability_balance") is not None
+                    else doc.get("affordability_amount", "")
+                ),
+                "ltp": doc.get("ltp", doc.get("option_ltp", "")),
+                "entry_price": doc.get("entry_price", gtt_prices.get("ENTRY", "")),
+                "target_price": doc.get("target_price", gtt_prices.get("TARGET", "")),
+                "stoploss_price": doc.get("stoploss_price", gtt_prices.get("STOPLOSS", "")),
+            })
+
+        trade_df = pd.DataFrame(trade_rows).fillna("")
+        trade_df = trade_df.sort_values(
+            "time_label",
+            key=lambda x: pd.to_datetime(x, format="%H:%M", errors="coerce"),
+            ascending=False,
+        ).reset_index(drop=True)
+        st.dataframe(trade_df, use_container_width=True, height=220, hide_index=True)
+    else:
+        st.info("No trade log entries found for the selected events.")
+
+    st.markdown("<div style='height: 24px;'></div>", unsafe_allow_html=True)
 
     st.subheader("Raw MongoDB data")
     st.dataframe(raw_df, use_container_width=True, height=420, hide_index=True)
