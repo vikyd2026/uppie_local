@@ -78,7 +78,7 @@ try:
         latest_time = processed_df["time_sort"].dropna().max()
 
         if pd.isna(latest_time):
-            st.warning("No valid time_label values found in processed rows.")
+            st.warning("No valid time_label values found in the processed rows.")
         else:
             strike_cols = sorted(
                 pd.to_numeric(processed_df["strike_price"], errors="coerce").dropna().unique().tolist()
